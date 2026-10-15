@@ -10,30 +10,30 @@ import (
 	"time"
 )
 
-// jwtHeader contains the JWT header fields.
 type jwtHeader struct {
 	Alg string `json:"alg"`
 	Typ string `json:"typ"`
 	Kid string `json:"kid"`
 }
 
-// jwtClaims contains the claims used in the token.
 type jwtClaims struct {
 	Sub string `json:"sub"`
 	Iat int64  `json:"iat"`
 	Exp int64  `json:"exp"`
 }
 
-// base64URLEncode encodes data using base64url without padding.
 func base64URLEncode(b []byte) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// signJWT creates and signs an RS256 JWT.
 func signJWT(key Key, expiresAt time.Time) (string, error) {
+	return signJWTWithUser(key, expiresAt, "fake-user")
+}
+
+func signJWTWithUser(key Key, expiresAt time.Time, username string) (string, error) {
 	header := jwtHeader{Alg: "RS256", Typ: "JWT", Kid: key.KID}
 	claims := jwtClaims{
-		Sub: "fake-user",
+		Sub: username,
 		Iat: time.Now().Unix(),
 		Exp: expiresAt.Unix(),
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -15,13 +16,12 @@ import (
 	"time"
 )
 
-// newTestServer creates a server for testing.
 func newTestServer(t *testing.T) (*httptest.Server, *KeyStore) {
 	t.Helper()
 
-	keys, err := NewKeyStore()
+	keys, err := testKeyStore(t)
 	if err != nil {
-		t.Fatalf("NewKeyStore() error = %v", err)
+		t.Fatalf("testKeyStore(t) error = %v", err)
 	}
 
 	srv := NewServer(keys)
@@ -31,16 +31,14 @@ func newTestServer(t *testing.T) (*httptest.Server, *KeyStore) {
 	return ts, keys
 }
 
-// --- key generation / JWKS conversion -------------------------------------
-
 func TestNewKeyStore_GeneratesDistinctKeys(t *testing.T) {
-	keys, err := NewKeyStore()
+	keys, err := testKeyStore(t)
 	if err != nil {
-		t.Fatalf("NewKeyStore() error = %v", err)
+		t.Fatalf("testKeyStore(t) error = %v", err)
 	}
 
-	valid := keys.ValidKey()
-	expired := keys.ExpiredKey()
+	valid := mustSigningKey(t, keys, false)
+	expired := mustSigningKey(t, keys, true)
 
 	if valid.KID == expired.KID {
 		t.Errorf("expected distinct kids, both were %q", valid.KID)
@@ -59,14 +57,17 @@ func TestNewKeyStore_GeneratesDistinctKeys(t *testing.T) {
 func TestUnexpiredJWKS_OnlyContainsValidKey(t *testing.T) {
 	_, keys := newTestServer(t)
 
-	jwks := keys.unexpiredJWKS(time.Now())
+	jwks, err := keys.unexpiredJWKS(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(jwks.Keys) != 1 {
 		t.Fatalf("expected exactly 1 key in JWKS, got %d", len(jwks.Keys))
 	}
 
 	got := jwks.Keys[0]
-	valid := keys.ValidKey()
-	expired := keys.ExpiredKey()
+	valid := mustSigningKey(t, keys, false)
+	expired := mustSigningKey(t, keys, true)
 
 	if got.Kid != valid.KID {
 		t.Errorf("JWKS key id = %q, want valid key id %q", got.Kid, valid.KID)
@@ -81,7 +82,7 @@ func TestUnexpiredJWKS_OnlyContainsValidKey(t *testing.T) {
 
 func TestToJWK_ModulusAndExponentDecodeToRealKey(t *testing.T) {
 	_, keys := newTestServer(t)
-	valid := keys.ValidKey()
+	valid := mustSigningKey(t, keys, false)
 	jwk := toJWK(valid)
 
 	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.N)
@@ -103,8 +104,6 @@ func TestToJWK_ModulusAndExponentDecodeToRealKey(t *testing.T) {
 		t.Error("decoded exponent does not match original key")
 	}
 }
-
-// --- GET /.well-known/jwks.json --------------------------------------------
 
 func TestJWKSEndpoint_ReturnsOnlyUnexpiredKey(t *testing.T) {
 	ts, keys := newTestServer(t)
@@ -130,11 +129,11 @@ func TestJWKSEndpoint_ReturnsOnlyUnexpiredKey(t *testing.T) {
 	if len(jwks.Keys) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(jwks.Keys))
 	}
-	if jwks.Keys[0].Kid != keys.ValidKey().KID {
-		t.Errorf("kid = %q, want %q", jwks.Keys[0].Kid, keys.ValidKey().KID)
+	if jwks.Keys[0].Kid != mustSigningKey(t, keys, false).KID {
+		t.Errorf("kid = %q, want %q", jwks.Keys[0].Kid, mustSigningKey(t, keys, false).KID)
 	}
 	for _, k := range jwks.Keys {
-		if k.Kid == keys.ExpiredKey().KID {
+		if k.Kid == mustSigningKey(t, keys, true).KID {
 			t.Error("expired key must not appear in JWKS")
 		}
 	}
@@ -154,8 +153,6 @@ func TestJWKSEndpoint_RejectsNonGET(t *testing.T) {
 	}
 }
 
-// --- POST /auth --------------------------------------------------------
-
 func TestAuthEndpoint_ValidToken(t *testing.T) {
 	ts, keys := newTestServer(t)
 
@@ -170,10 +167,10 @@ func TestAuthEndpoint_ValidToken(t *testing.T) {
 	}
 
 	token := readBody(t, resp)
-	header, claims := verifyAndParse(t, token, keys.ValidKey())
+	header, claims := verifyAndParse(t, token, mustSigningKey(t, keys, false))
 
-	if header.Kid != keys.ValidKey().KID {
-		t.Errorf("token kid = %q, want %q", header.Kid, keys.ValidKey().KID)
+	if header.Kid != mustSigningKey(t, keys, false).KID {
+		t.Errorf("token kid = %q, want %q", header.Kid, mustSigningKey(t, keys, false).KID)
 	}
 	if header.Alg != "RS256" {
 		t.Errorf("token alg = %q, want RS256", header.Alg)
@@ -197,10 +194,10 @@ func TestAuthEndpoint_ExpiredToken(t *testing.T) {
 	}
 
 	token := readBody(t, resp)
-	header, claims := verifyAndParse(t, token, keys.ExpiredKey())
+	header, claims := verifyAndParse(t, token, mustSigningKey(t, keys, true))
 
-	if header.Kid != keys.ExpiredKey().KID {
-		t.Errorf("token kid = %q, want %q", header.Kid, keys.ExpiredKey().KID)
+	if header.Kid != mustSigningKey(t, keys, true).KID {
+		t.Errorf("token kid = %q, want %q", header.Kid, mustSigningKey(t, keys, true).KID)
 	}
 	if !time.Unix(claims.Exp, 0).Before(time.Now()) {
 		t.Error("expired token should carry a past exp claim")
@@ -210,7 +207,6 @@ func TestAuthEndpoint_ExpiredToken(t *testing.T) {
 func TestAuthEndpoint_ExpiredParamPresenceIsEnoughRegardlessOfValue(t *testing.T) {
 	ts, keys := newTestServer(t)
 
-	// An empty expired parameter should still use the expired key.
 	resp, err := http.Post(ts.URL+"/auth?expired=", "application/x-www-form-urlencoded", nil)
 	if err != nil {
 		t.Fatalf("POST auth?expired=: %v", err)
@@ -218,9 +214,46 @@ func TestAuthEndpoint_ExpiredParamPresenceIsEnoughRegardlessOfValue(t *testing.T
 	defer resp.Body.Close()
 
 	token := readBody(t, resp)
-	header, _ := verifyAndParse(t, token, keys.ExpiredKey())
-	if header.Kid != keys.ExpiredKey().KID {
+	header, _ := verifyAndParse(t, token, mustSigningKey(t, keys, true))
+	if header.Kid != mustSigningKey(t, keys, true).KID {
 		t.Errorf("expected expired key to be used when 'expired' param is present with empty value")
+	}
+}
+
+func TestAuthEndpoint_BasicAuthAndJSONPayload(t *testing.T) {
+	ts, keys := newTestServer(t)
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/auth", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth("basicUser", "pass123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	token := readBody(t, resp)
+	_, claims := verifyAndParse(t, token, mustSigningKey(t, keys, false))
+	if claims.Sub != "basicUser" {
+		t.Errorf("claims.Sub = %q, want basicUser", claims.Sub)
+	}
+
+	body := []byte(`{"username":"userABC","password":"password123"}`)
+	req2, err := http.NewRequest(http.MethodPost, ts.URL+"/auth", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	token2 := readBody(t, resp2)
+	_, claims2 := verifyAndParse(t, token2, mustSigningKey(t, keys, false))
+	if claims2.Sub != "userABC" {
+		t.Errorf("claims2.Sub = %q, want userABC", claims2.Sub)
 	}
 }
 
@@ -238,7 +271,35 @@ func TestAuthEndpoint_RejectsNonPOST(t *testing.T) {
 	}
 }
 
-// --- test helpers --------------------------------------------------------
+func TestJWKS_FailedToRead(t *testing.T) {
+	keys, err := testKeyStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = keys.Close()
+	srv := NewServer(keys)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
+	srv.handleJWKS(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 status on closed db, got %d", rec.Code)
+	}
+}
+
+func TestAuth_FailedToReadSigningKey(t *testing.T) {
+	keys, err := testKeyStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = keys.Close()
+	srv := NewServer(keys)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth", nil)
+	srv.handleAuth(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 status on closed db, got %d", rec.Code)
+	}
+}
 
 func readBody(t *testing.T, resp *http.Response) string {
 	t.Helper()
@@ -249,7 +310,6 @@ func readBody(t *testing.T, resp *http.Response) string {
 	return strings.TrimSpace(string(data))
 }
 
-// verifyAndParse verifies and decodes a JWT for testing.
 func verifyAndParse(t *testing.T, token string, signer Key) (jwtHeader, jwtClaims) {
 	t.Helper()
 

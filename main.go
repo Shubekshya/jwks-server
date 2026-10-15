@@ -5,15 +5,15 @@ import (
 	"net/http"
 )
 
-// Allows the server start function to be replaced during testing.
 var listenAndServe = http.ListenAndServe
+var dbFile = "totally_not_my_privateKeys.db"
 
-// run starts the server using a new key store.
 func run(addr string) error {
-	keys, err := NewKeyStore()
+	keys, err := OpenKeyStore(dbFile)
 	if err != nil {
 		return err
 	}
+	defer keys.Close()
 
 	srv := NewServer(keys)
 	log.Printf("jwks-server listening on %s", addr)

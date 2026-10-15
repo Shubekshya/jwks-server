@@ -1,2 +1,6 @@
 .DS_Store
 .Rhistory
+
+# Generated files
+/server
+/totally_not_my_privateKeys.db

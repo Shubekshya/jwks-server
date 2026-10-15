@@ -3,10 +3,15 @@ package main
 import (
 	"errors"
 	"net/http"
+	"path/filepath"
 	"testing"
 )
 
 func TestRun_WiresServerAndUsesGivenAddr(t *testing.T) {
+	origDB := dbFile
+	dbFile = filepath.Join(t.TempDir(), "test.db")
+	defer func() { dbFile = origDB }()
+
 	orig := listenAndServe
 	defer func() { listenAndServe = orig }()
 
@@ -30,6 +35,10 @@ func TestRun_WiresServerAndUsesGivenAddr(t *testing.T) {
 }
 
 func TestRun_PropagatesListenError(t *testing.T) {
+	origDB := dbFile
+	dbFile = filepath.Join(t.TempDir(), "test.db")
+	defer func() { dbFile = origDB }()
+
 	orig := listenAndServe
 	defer func() { listenAndServe = orig }()
 
@@ -44,6 +53,10 @@ func TestRun_PropagatesListenError(t *testing.T) {
 }
 
 func TestRun_PropagatesKeyStoreError(t *testing.T) {
+	origDB := dbFile
+	dbFile = filepath.Join(t.TempDir(), "test.db")
+	defer func() { dbFile = origDB }()
+
 	origReader := randReader
 	defer func() { randReader = origReader }()
 	randReader = failingReader{}
